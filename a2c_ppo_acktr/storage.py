@@ -1,13 +1,16 @@
 import torch
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 
+import random
+from collections import deque, namedtuple
 
 def _flatten_helper(T, N, _tensor):
     return _tensor.view(T * N, *_tensor.size()[2:])
 
+Transition = namedtuple('Transition', ('state', 'action', 'reward', 'log_policy', 'mask'))
 
 class RolloutStorage(object):
-    def __init__(self, num_steps, num_processes, obs_shape, action_space, recurrent_hidden_state_size):
+    def __init__(self, num_steps, num_processes, obs_shape, action_space, recurrent_hidden_state_size, off_policy=None, capacity=None):
         self.obs = torch.zeros(num_steps + 1, num_processes, *obs_shape)
         self.recurrent_hidden_states = torch.zeros(num_steps + 1, num_processes, recurrent_hidden_state_size)
         self.rewards = torch.zeros(num_steps, num_processes, 1)
@@ -25,6 +28,13 @@ class RolloutStorage(object):
 
         self.num_steps = num_steps
         self.step = 0
+        # I have added
+        self.off_policy = off_policy
+        if self.off_policy:
+            self.capacity = capacity
+            self.memory = deque(maxlen=self.capacity)
+            self.trajectory = []
+            self.mem_length = 0
 
     def to(self, device):
         self.obs = self.obs.to(device)
@@ -36,7 +46,7 @@ class RolloutStorage(object):
         self.actions = self.actions.to(device)
         self.masks = self.masks.to(device)
 
-    def insert(self, obs, recurrent_hidden_states, actions, action_log_probs, value_preds, rewards, masks):
+    def insert(self, obs, recurrent_hidden_states, actions, action_log_probs, value_preds, rewards, masks, states=None):
         self.obs[self.step + 1].copy_(obs)
         self.recurrent_hidden_states[self.step + 1].copy_(recurrent_hidden_states)
         self.actions[self.step].copy_(actions)
@@ -45,12 +55,28 @@ class RolloutStorage(object):
         self.rewards[self.step].copy_(rewards)
         self.masks[self.step + 1].copy_(masks)
 
+        # Added by me
+        # For off policy Memory
+        if self.off_policy:
+            if self.step == 0 and len(self.trajectory) > 0:
+                self.memory.append((self.trajectory, states))
+                self.trajectory = []
+            self.trajectory.append(Transition(states, actions, rewards, action_log_probs, masks))
+
         self.step = (self.step + 1) % self.num_steps
 
+
+    
     def after_update(self):
         self.obs[0].copy_(self.obs[-1])
         self.recurrent_hidden_states[0].copy_(self.recurrent_hidden_states[-1])
         self.masks[0].copy_(self.masks[-1])
+
+    # Added
+    def sample_batch_from_memory(self, bt_size):
+        idx = [random.randrange(0, len(self.memory), 1) for _ in range(bt_size)]
+        mem = [self.memory[i] for i in idx]
+        return mem
 
     def compute_returns(self, next_value, use_gae, gamma, tau):
         if use_gae:
