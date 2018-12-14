@@ -25,8 +25,8 @@ class Policy(nn.Module):
             else:
                 raise NotImplementedError
 
-        act_size = action_space.n if ction_space.__class__.__name__ == "Discrete" else 1
-        self.base = base(obs_shape[0], act_size, **base_kwargs)
+        self.act_size = action_space.n if action_space.__class__.__name__ == "Discrete" else 1
+        self.base = base(obs_shape[0], self.act_size, **base_kwargs)
 
         if action_space.__class__.__name__ == "Discrete":
             num_outputs = action_space.n
@@ -53,9 +53,8 @@ class Policy(nn.Module):
         raise NotImplementedError
 
     def act(self, inputs, rnn_hxs, masks, deterministic=False):
-        value, actor_features, rnn_hxs, Q = self.base(inputs, rnn_hxs, masks)
+        actor_features, rnn_hxs, Q = self.base(inputs, rnn_hxs, masks)
         dist = self.dist(actor_features)
-
         if deterministic:
             action = dist.mode()
         else:
@@ -64,20 +63,30 @@ class Policy(nn.Module):
         action_log_probs = dist.log_probs(action)
         dist_entropy = dist.entropy().mean()
 
-        return value, action, action_log_probs, rnn_hxs, Q
+        # print (actor_features.sum(1, keepdim=True), Q)
+        probs = dist.prob()
+
+        value = (probs * Q).mean(1, keepdim=True)
+
+        return value, action, action_log_probs, rnn_hxs, Q, probs
 
     def get_value(self, inputs, rnn_hxs, masks):
-        value, _, _, = self.base(inputs, rnn_hxs, masks)
+        actor_features, _, Q= self.base(inputs, rnn_hxs, masks)
+        dist = self.dist(actor_features)
+        probs = dist.prob()
+        value = (probs * Q).mean(1, keepdim=True)
         return value
 
     def evaluate_actions(self, inputs, rnn_hxs, masks, action):
-        value, actor_features, rnn_hxs, Q = self.base(inputs, rnn_hxs, masks)
+        actor_features, rnn_hxs, Q = self.base(inputs, rnn_hxs, masks)
         dist = self.dist(actor_features)
 
         action_log_probs = dist.log_probs(action)
         dist_entropy = dist.entropy().mean()
 
-        return value, action_log_probs, dist_entropy, rnn_hxs, Q
+        probs = dist.prob()
+        value = (probs * Q).mean(1, keepdim=True)
+        return value, action_log_probs, dist_entropy, rnn_hxs, Q, probs
 
 
 class NNBase(nn.Module):
@@ -196,7 +205,7 @@ class CNNBase(NNBase):
             nn.init.orthogonal_,
             lambda x: nn.init.constant_(x, 0))
 
-        self.critic_linear = init_(nn.Linear(hidden_size, 1))
+        # self.critic_linear = init_(nn.Linear(hidden_size, 1))
         self.critic_Q = init_(nn.Linear(hidden_size, action_size))
 
         self.train()
@@ -207,7 +216,7 @@ class CNNBase(NNBase):
         if self.is_recurrent:
             x, rnn_hxs = self._forward_gru(x, rnn_hxs, masks)
 
-        return self.critic_linear(x), x, rnn_hxs, self.critic_Q(x)
+        return x, rnn_hxs, self.critic_Q(x)
 
 
 class MLPBase(NNBase):
@@ -236,7 +245,7 @@ class MLPBase(NNBase):
             nn.Tanh()
         )
 
-        self.critic_linear = init_(nn.Linear(hidden_size, 1))
+        # self.critic_linear = init_(nn.Linear(hidden_size, 1))
         self.critic_Q = init_(nn.Linear(hidden_size, action_size))
 
         self.train()
@@ -250,4 +259,4 @@ class MLPBase(NNBase):
         hidden_critic = self.critic(x)
         hidden_actor = self.actor(x)
 
-        return self.critic_linear(hidden_critic), hidden_actor, rnn_hxs, self.critic_Q(x)
+        return hidden_actor, rnn_hxs, self.critic_Q(hidden_critic)

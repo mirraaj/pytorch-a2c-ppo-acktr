@@ -7,16 +7,19 @@ from collections import deque, namedtuple
 def _flatten_helper(T, N, _tensor):
     return _tensor.view(T * N, *_tensor.size()[2:])
 
-Transition = namedtuple('Transition', ('state', 'action', 'reward', 'log_policy', 'mask'))
+Transition = namedtuple('Transition', ('state', 'action', 'reward', 'policy', 'mask'))
 
 class RolloutStorage(object):
-    def __init__(self, num_steps, num_processes, obs_shape, action_space, recurrent_hidden_state_size, off_policy=None, capacity=None):
+    def __init__(self, num_steps, num_processes, obs_shape, action_space, recurrent_hidden_state_size, off_policy=None, capacity=200):
         self.obs = torch.zeros(num_steps + 1, num_processes, *obs_shape)
         self.recurrent_hidden_states = torch.zeros(num_steps + 1, num_processes, recurrent_hidden_state_size)
         self.rewards = torch.zeros(num_steps, num_processes, 1)
         self.value_preds = torch.zeros(num_steps + 1, num_processes, 1)
         self.returns = torch.zeros(num_steps + 1, num_processes, 1)
+        self.Q_preds = torch.zeros(num_steps + 1, num_processes, action_space.n)
+        self.probs = torch.zeros(num_steps + 1, num_processes, action_space.n)
         self.action_log_probs = torch.zeros(num_steps, num_processes, 1)
+        self.action_space = action_space
         if action_space.__class__.__name__ == 'Discrete':
             action_shape = 1
         else:
@@ -45,8 +48,10 @@ class RolloutStorage(object):
         self.action_log_probs = self.action_log_probs.to(device)
         self.actions = self.actions.to(device)
         self.masks = self.masks.to(device)
+        self.Q_preds = self.Q_preds.to(device)
+        self.probs = self.probs.to(device)
 
-    def insert(self, obs, recurrent_hidden_states, actions, action_log_probs, value_preds, rewards, masks, states=None):
+    def insert(self, obs, recurrent_hidden_states, actions, action_log_probs, value_preds, rewards, masks, Qs, probs):
         self.obs[self.step + 1].copy_(obs)
         self.recurrent_hidden_states[self.step + 1].copy_(recurrent_hidden_states)
         self.actions[self.step].copy_(actions)
@@ -54,18 +59,16 @@ class RolloutStorage(object):
         self.value_preds[self.step].copy_(value_preds)
         self.rewards[self.step].copy_(rewards)
         self.masks[self.step + 1].copy_(masks)
-
+        self.Q_preds[self.step + 1].copy_(Qs)
+        self.probs[self.step + 1].copy_(probs)
         # Added by me
         # For off policy Memory
         if self.off_policy:
             if self.step == 0 and len(self.trajectory) > 0:
-                self.memory.append((self.trajectory, states))
+                self.memory.append((self.trajectory, obs))
                 self.trajectory = []
-            self.trajectory.append(Transition(states, actions, rewards, action_log_probs, masks))
-
+            self.trajectory.append(Transition(obs, actions, rewards, probs, masks))
         self.step = (self.step + 1) % self.num_steps
-
-
     
     def after_update(self):
         self.obs[0].copy_(self.obs[-1])
@@ -74,11 +77,13 @@ class RolloutStorage(object):
 
     # Added
     def sample_batch_from_memory(self, bt_size):
+        bt_size = min(bt_size, len(self.memory))
         idx = [random.randrange(0, len(self.memory), 1) for _ in range(bt_size)]
         mem = [self.memory[i] for i in idx]
         return mem
 
     def compute_returns(self, next_value, use_gae, gamma, tau):
+        use_gae = False # Deliberately to skip GAE
         if use_gae:
             self.value_preds[-1] = next_value
             gae = 0
@@ -113,9 +118,12 @@ class RolloutStorage(object):
             masks_batch = self.masks[:-1].view(-1, 1)[indices]
             old_action_log_probs_batch = self.action_log_probs.view(-1, 1)[indices]
             adv_targ = advantages.view(-1, 1)[indices]
+            # print (advantages)
+            Q_value = self.Q_preds.view(-1,self.action_space.n)[indices]
+            Q_value = Q_value.gather(1, actions_batch)
 
             yield obs_batch, recurrent_hidden_states_batch, actions_batch, \
-                value_preds_batch, return_batch, masks_batch, old_action_log_probs_batch, adv_targ
+                value_preds_batch, return_batch, masks_batch, old_action_log_probs_batch, adv_targ, Q_value
 
     def recurrent_generator(self, advantages, num_mini_batch):
         num_processes = self.rewards.size(1)

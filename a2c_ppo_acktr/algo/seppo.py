@@ -10,7 +10,7 @@ def _poisson(lmbd):
     p *= random.uniform(0, 1)
   return max(k - 1, 0)
 
-class PPO():
+class SEPPO():
     def __init__(self,
                  actor_critic,
                  clip_param,
@@ -57,10 +57,10 @@ class PPO():
             for sample in data_generator:
                 obs_batch, recurrent_hidden_states_batch, actions_batch, \
                    value_preds_batch, return_batch, masks_batch, old_action_log_probs_batch, \
-                        adv_targ = sample
+                        adv_targ, Q_value_batch = sample
 
                 # Reshape to do in a single forward pass for all steps
-                values, action_log_probs, dist_entropy, _ = self.actor_critic.evaluate_actions(
+                values, action_log_probs, dist_entropy, _, Qs_batch, _ = self.actor_critic.evaluate_actions(
                     obs_batch, recurrent_hidden_states_batch,
                     masks_batch, actions_batch)
 
@@ -70,10 +70,13 @@ class PPO():
                                            1.0 + self.clip_param) * adv_targ
                 action_loss = -torch.min(surr1, surr2).mean()
 
+                Qs_batch = Qs_batch.view(-1, rollouts.action_space.n)
+                Qs_batch = Qs_batch.gather(1, actions_batch)
+
                 if self.use_clipped_value_loss:
-                    value_pred_clipped = value_preds_batch + \
-                        (values - value_preds_batch).clamp(-self.clip_param, self.clip_param)
-                    value_losses = (values - return_batch).pow(2)
+                    value_pred_clipped = Qs_batch + \
+                        (Qs_batch - Q_value_batch).clamp(-self.clip_param, self.clip_param)
+                    value_losses = (Qs_batch - return_batch).pow(2)
                     value_losses_clipped = (value_pred_clipped - return_batch).pow(2)
                     value_loss = 0.5 * torch.max(value_losses, value_losses_clipped).mean()
                 else:
@@ -96,6 +99,7 @@ class PPO():
         action_loss_epoch /= num_updates
         dist_entropy_epoch /= num_updates
 
+        # print (rollouts.sample_batch_from_memory(2))
         return value_loss_epoch, action_loss_epoch, dist_entropy_epoch
 
     def update_off_policy(self, rollouts):
@@ -103,11 +107,19 @@ class PPO():
             mem = rollouts.sample_batch_from_memory(args.bt_size)
             for memory in mem:
                 recurrent_hidden_states = torch.zeros(*rollouts.recurrent_hidden_states.size())
-
-                Qs, Vs, 
+                self.obs = torch.zeros(num_steps + 1, num_processes, *obs_shape)
+                self.recurrent_hidden_states = torch.zeros(num_steps + 1, num_processes, recurrent_hidden_state_size)
+                self.rewards = torch.zeros(num_steps, num_processes, 1)
+                self.value_preds = torch.zeros(num_steps + 1, num_processes, 1)
+                self.returns = torch.zeros(num_steps + 1, num_processes, 1)
+                self.Q_preds = torch.zeros(num_steps + 1, num_processes, action_space.n)
+                self.probs = torch.zeros(num_steps + 1, num_processes, action_space.n)
+                self.action_log_probs = torch.zeros(num_steps, num_processes, 1)
+                self.action_space = action_space
                 for step in range(rollouts.num_steps):
                     with torch.no_grad():
-                        value, action, action_log_prob, recurrent_hidden_states[(step+1)%rollouts.num_steps], Q = actor_critic.act(
+
+                        value, action, action_log_prob, recurrent_hidden_states[(step+1)%rollouts.num_steps], Q, probs = actor_critic.act(
                                 memory.state[step],
                                 recurrent_hidden_states[step],
                                 memory.masks[step])
