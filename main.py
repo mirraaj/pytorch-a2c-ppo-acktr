@@ -95,7 +95,7 @@ def main():
 
     start = time.time()
     for j in range(num_updates):
-
+        print (j, num_updates)
         if args.use_linear_lr_decay:
             # decrease learning rate linearly
             if args.algo == "acktr":
@@ -135,6 +135,11 @@ def main():
         rollouts.compute_returns(next_value, args.use_gae, args.gamma, args.tau)
 
         value_loss, action_loss, dist_entropy = agent.update(rollouts)
+        # if j>=10:
+        # 	v1, a1, d1 = agent.update_off_policy(rollouts)
+	       #  value_loss = (v1 + value_loss) / 2.
+	       #  action_loss = (a1 + action_loss) / 2.
+	       #  dist_entropy = (d1 + dist_entropy) / 2.
 
         rollouts.after_update()
 

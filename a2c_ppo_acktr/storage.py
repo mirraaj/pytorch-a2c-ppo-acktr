@@ -10,7 +10,7 @@ def _flatten_helper(T, N, _tensor):
 Transition = namedtuple('Transition', ('state', 'action', 'reward', 'policy', 'mask'))
 
 class RolloutStorage(object):
-    def __init__(self, num_steps, num_processes, obs_shape, action_space, recurrent_hidden_state_size, off_policy=None, capacity=200):
+    def __init__(self, num_steps, num_processes, obs_shape, action_space, recurrent_hidden_state_size, off_policy=None, capacity=15):
         self.obs = torch.zeros(num_steps + 1, num_processes, *obs_shape)
         self.recurrent_hidden_states = torch.zeros(num_steps + 1, num_processes, recurrent_hidden_state_size)
         self.rewards = torch.zeros(num_steps, num_processes, 1)
@@ -20,19 +20,33 @@ class RolloutStorage(object):
         self.probs = torch.zeros(num_steps + 1, num_processes, action_space.n)
         self.action_log_probs = torch.zeros(num_steps, num_processes, 1)
         self.action_space = action_space
+
+        self.obs_ = torch.zeros(num_steps + 1, num_processes, *obs_shape)
+        self.rewards_ = torch.zeros(num_steps, num_processes, 1)
+        self.probs_ = torch.zeros(num_steps + 1, num_processes, action_space.n)
+        
+
         if action_space.__class__.__name__ == 'Discrete':
             action_shape = 1
         else:
             action_shape = action_space.shape[0]
         self.actions = torch.zeros(num_steps, num_processes, action_shape)
+        self.actions_ = torch.zeros(num_steps, num_processes, action_shape)
+
         if action_space.__class__.__name__ == 'Discrete':
             self.actions = self.actions.long()
         self.masks = torch.ones(num_steps + 1, num_processes, 1)
+        self.masks_ = torch.ones(num_steps + 1, num_processes, 1)
+
 
         self.num_steps = num_steps
         self.step = 0
         # I have added
+        self.num_processes = num_processes
+        self.recurrent_hidden_state_size = recurrent_hidden_state_size
         self.off_policy = off_policy
+        self.device = None
+        self.num_mini_batch = None
         if self.off_policy:
             self.capacity = capacity
             self.memory = deque(maxlen=self.capacity)
@@ -50,6 +64,8 @@ class RolloutStorage(object):
         self.masks = self.masks.to(device)
         self.Q_preds = self.Q_preds.to(device)
         self.probs = self.probs.to(device)
+        if not self.device:
+            self.device = device
 
     def insert(self, obs, recurrent_hidden_states, actions, action_log_probs, value_preds, rewards, masks, Qs, probs):
         self.obs[self.step + 1].copy_(obs)
@@ -63,13 +79,13 @@ class RolloutStorage(object):
         self.probs[self.step + 1].copy_(probs)
         # Added by me
         # For off policy Memory
-        if self.off_policy:
-            if self.step == 0 and len(self.trajectory) > 0:
-                self.memory.append((self.trajectory, obs))
-                self.trajectory = []
-            self.trajectory.append(Transition(obs, actions, rewards, probs, masks))
+
         self.step = (self.step + 1) % self.num_steps
-    
+        if self.off_policy:
+
+            if self.step == 0:
+                self.memory.append((self.obs.detach(), self.actions.detach(), self.rewards.detach(), self.probs.detach(),
+                    self.masks.detach()))
     def after_update(self):
         self.obs[0].copy_(self.obs[-1])
         self.recurrent_hidden_states[0].copy_(self.recurrent_hidden_states[-1])
@@ -94,11 +110,13 @@ class RolloutStorage(object):
         else:
             self.returns[-1] = next_value
             for step in reversed(range(self.rewards.size(0))):
-                self.returns[step] = self.returns[step + 1] * \
-                    gamma * self.masks[step + 1] + self.rewards[step]
+                self.returns[step] = (self.returns[step + 1] - self.Q_preds[step].gather(1, self.actions[step]) * \
+                    gamma * self.masks[step + 1] + self.rewards[step] + gamma * self.value_preds[step])
 
 
     def feed_forward_generator(self, advantages, num_mini_batch):
+        if self.num_mini_batch != num_mini_batch:
+            self.num_mini_batch = num_mini_batch
         num_steps, num_processes = self.rewards.size()[0:2]
         batch_size = num_processes * num_steps
         assert batch_size >= num_mini_batch, (
@@ -119,7 +137,8 @@ class RolloutStorage(object):
             old_action_log_probs_batch = self.action_log_probs.view(-1, 1)[indices]
             adv_targ = advantages.view(-1, 1)[indices]
             # print (advantages)
-            Q_value = self.Q_preds.view(-1,self.action_space.n)[indices]
+            Q_preds = self.Q_preds[:-1]
+            Q_value = Q_preds.view(-1,self.action_space.n)[indices]
             Q_value = Q_value.gather(1, actions_batch)
 
             yield obs_batch, recurrent_hidden_states_batch, actions_batch, \

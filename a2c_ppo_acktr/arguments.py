@@ -47,7 +47,7 @@ def get_args():
                         help='eval interval, one eval per n updates (default: None)')
     parser.add_argument('--vis-interval', type=int, default=100,
                         help='vis interval, one log per n updates (default: 100)')
-    parser.add_argument('--num-env-steps', type=int, default=10e6,
+    parser.add_argument('--num-env-steps', type=int, default=1e5,
                         help='number of environment steps to train (default: 10e6)')
     parser.add_argument('--env-name', default='PongNoFrameskip-v4',
                         help='environment to train on (default: PongNoFrameskip-v4)')
@@ -71,6 +71,14 @@ def get_args():
                         help='port to run the server on (default: 8097)')
     args = parser.parse_args()
 
+    ##############################################
+    parser.add_argument('--bt-size', type=int, default=3,
+                        help='None')
+    parser.add_argument('--c', type=float, default=10.,
+                    help='None')
+    ##############################################
     args.cuda = not args.no_cuda and torch.cuda.is_available()
+
+
 
     return args
